@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.12)
-project(ECS SINGLE_HEADER_LIB)
+project(ECS BEAR_BONES_ECS)
 
 # Use C++17
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Add include directory

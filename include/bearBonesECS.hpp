@@ -1,6 +1,3 @@
-#include <stdio.h>
-#include <stddef.h>
-#include <stdbool.h>
 #include <vector>
 #include <unordered_map>
 #include <random>
@@ -10,12 +7,11 @@
 #include <thread>
 #include <unordered_set>
 
+// comment this line to disable warning messages
 #define ECS_DEBUG
 
 #ifdef ECS_DEBUG
-#define ECS_WARNING_IF(condition, message, retval) \
-    do { if (warnIf(condition, message, __func__)) return retval; } while (0)
-
+#define ECS_WARNING_IF(condition, message, retval) do { if (warnIf(condition, message, __func__)) return retval; } while (0)
 #else
 #define ECS_WARNING_IF(condition, message, retval)
 #endif
@@ -35,6 +31,7 @@
 #define ECS_IS_RESTRICTED                   "ECS is restricted"
 #define SYSTEM_BATCH_DOESNT_EXIST           "System batch doesn't exist"
 
+namespace bbECS { 
 
 struct EntityID {
     size_t id;
@@ -169,25 +166,26 @@ private:
     static bool warnIf(bool condition, const std::string& message, const char* func);
     static bool errorIf(bool condition, const std::string& message, const char* func);
 };
-
+}
 namespace std {
     // Specialize std::hash for EntityID
     template <>
-    struct hash<EntityID> {
-        size_t operator()(const EntityID& id) const {
+    struct hash<bbECS::EntityID> {
+        size_t operator()(const bbECS::EntityID& id) const {
             return std::hash<size_t>()(id.id);
         }
     };
 
     // Specialize std::hash for EntityGUID
     template <>
-    struct hash<EntityGUID> {
-        uint64_t operator()(const EntityGUID& guid) const {
+    struct hash<bbECS::EntityGUID> {
+        uint64_t operator()(const bbECS::EntityGUID& guid) const {
             return std::hash<uint64_t>()(guid.id);
         }
     };
 }
 
+namespace bbECS {
 ECS::ECS() {
     entitiesMap = new std::unordered_map<EntityGUID, EntityID>();
     entities = new std::vector<Entity>();
@@ -974,3 +972,5 @@ bool ECS::errorIf(bool condition, const std::string& message, const char* func){
     }
     return false;
 }
+
+} // namespace bbecs
