@@ -30,8 +30,11 @@
 #define ENTITY_GUID_DOESNT_EXIST            "Entity GUID doesn't exist"
 #define ECS_IS_RESTRICTED                   "ECS is restricted"
 #define SYSTEM_BATCH_DOESNT_EXIST           "System batch doesn't exist"
+#define MEMBER_DOESNT_EXIST                 "Member doesn't exist"
 
 namespace bbECS { 
+
+class ECS;
 
 struct EntityID {
     size_t id;
@@ -45,10 +48,19 @@ struct EntityGUID {
     bool operator==(const EntityGUID& other) const {return id == other.id;}
 };
 
+struct MemberMeta {
+    size_t offset;
+    size_t size;
+    bool isPointer;
+    int arraySize;
+
+    std::string (*toString)(void*, ECS&, int);
+};
+
 using SystemBatchID = uint64_t;
+using TypeID = size_t;
 
 class ECS {
-    using TypeID = size_t;
     using ComponentID = size_t;
 
     template <typename T>
@@ -65,11 +77,16 @@ class ECS {
     struct ComponentType {
         void *storage;
         size_t size;
+        size_t componentSize;
         size_t capacity;
         float growthFactor = 1.5f;
         bool isLocked = false;
         bool isReadOnly = false;
-    
+
+        std::string name;
+        std::unordered_map<std::string, MemberMeta> members;
+        
+        std::string (*toString)(void*, ECS&, int);
         void (*removeComponentTypeFunc)(ECS &ecs);
         void (*removeComponentFunc)(EntityID id, ECS &ecs);
     };
@@ -83,28 +100,11 @@ class ECS {
         std::vector<std::vector<System>> parallelSystems;
     };
 
-    template <typename T> static void removeComponentType_(ECS &ecs);
-    template <typename T> static void removeComponent_(EntityID id, ECS &ecs);
-
-private:
-
-    std::unordered_map<EntityGUID, EntityID> *entitiesMap; 
-    std::vector<Entity> *entities;
-    std::unordered_map<TypeID, ComponentType> componentTypes; 
-    EntityID cachedEntityID = {SIZE_MAX};
-
-    std::unordered_map<SystemBatchID, SystemBatch> systemBatches;
-
-    bool restricted = false;
-    bool isRoot = true;
-    std::vector<ECS> children;
-
-    ECS(std::unordered_map<EntityGUID, EntityID> *entitiesMap, std::vector<Entity> *entities,
-        std::unordered_map<TypeID, ComponentType> componentTypes, bool restricted, bool isRoot = false);
-
 public:
     ECS();
     ~ECS();
+    std::string toString(); 
+    static std::string prettyFormat(const std::string& input);
 
     // Entity management
     ECS &addEntity();
@@ -112,6 +112,8 @@ public:
     ECS &removeEntity(EntityGUID entityId);
     ECS &removeEntity(EntityID entityId);
     const EntityID getEntityID(EntityGUID guid) const;
+    std::string toString(EntityGUID guid);
+    std::string toString(EntityID guid);
 
     // Component management
     template <typename T, typename... Args> ECS &addComponent(Args&&... args);
@@ -121,17 +123,25 @@ public:
     template <typename T> ECS &removeComponent(EntityID entityID);
 
     // Component access
-    template<typename... Components> std::tuple<Components&...> getComponents(EntityID entityId);
+    void* getComponent(EntityID entityId, TypeID typeID);
     template <typename T> T &getComponent(EntityGUID entityId);
     template <typename T> T &getComponent(EntityID entityId);
     template <typename T> const T &readComponent(EntityGUID entityId) const;
     template <typename T> const T &readComponent(EntityID entityId) const;
     template <typename T> ECS &setReadOnly();
     template <typename T> ECS &setReadWrite();
+    template <typename T> std::string toString(T &t, int arraySize = 0);
+    template <typename U, typename T> std::string toString(T &t, std::string memberName);
     
     // Component type management
     template <typename T> ECS &addComponentType(size_t reserve = 10);
+    template <typename T> ECS &addComponentType(std::string name, size_t reserve = 10);
     template <typename T> ECS &removeComponentType();
+    template <typename T> std::string getName();
+    template <typename T> TypeID getTypeID();
+    template <typename T, typename MemberType>
+    ECS &addMemberMeta(MemberType T::*memberPtr, std::string name, int arraySize_ = 0, std::string (*toString_)(void*, ECS&, int) = nullptr);
+    template <typename T> MemberMeta getMemberMeta(std::string name);
 
     // Looping through components
     template <typename T> ECS &forEach(std::function<void(T&)> func, size_t threadCount = 1);
@@ -151,6 +161,7 @@ public:
     ECS &runSystemBatch(SystemBatchID id);
 
 private:
+    template<typename... Components> std::tuple<Components&...> getComponents(EntityID entityId);
     std::vector<TypeID> getAllComponentTypeIDs();
     std::vector<TypeID> getParallelSystemComponentIDs(SystemBatchID id, size_t index);
     ECS &killChildren();
@@ -165,6 +176,25 @@ private:
     static bool haveCommonElements(const std::vector<TypeID>& vec1, const std::vector<TypeID>& vec2);
     static bool warnIf(bool condition, const std::string& message, const char* func);
     static bool errorIf(bool condition, const std::string& message, const char* func);
+    template <typename T> static void removeComponentType_(ECS &ecs);
+    template <typename T> static void removeComponent_(EntityID id, ECS &ecs);
+
+    template <typename T>
+    static std::string toString(void* data, ECS &ecs, int arraySize = 1);
+
+    std::unordered_map<EntityGUID, EntityID> *entitiesMap; 
+    std::vector<Entity> *entities;
+    std::unordered_map<TypeID, ComponentType> componentTypes; 
+    EntityID cachedEntityID = {SIZE_MAX};
+
+    std::unordered_map<SystemBatchID, SystemBatch> systemBatches;
+
+    bool restricted = false;
+    bool isRoot = true;
+    std::vector<ECS> children;
+
+    ECS(std::unordered_map<EntityGUID, EntityID> *entitiesMap, std::vector<Entity> *entities,
+        std::unordered_map<TypeID, ComponentType> componentTypes, bool restricted, bool isRoot = false);
 };
 }
 namespace std {
@@ -186,6 +216,7 @@ namespace std {
 }
 
 namespace bbECS {
+
 ECS::ECS() {
     entitiesMap = new std::unordered_map<EntityGUID, EntityID>();
     entities = new std::vector<Entity>();
@@ -412,6 +443,14 @@ template <typename T>
 T &ECS::getComponent(EntityID entityId) {
     TypeID typeID = typeid(T).hash_code();
 
+    void* componentPtr = getComponent(entityId, typeID);
+
+    Component<T>* componentPtrCasted = static_cast<Component<T>*>(componentPtr);
+
+    return componentPtrCasted->data;
+}
+
+void* ECS::getComponent(EntityID entityId, TypeID typeID){
     ECS_ERROR_IF(entityId.id > entities->size(), ENTITY_DOESNT_EXIST);
 
     auto componentTypeIt = componentTypes.find(typeID);
@@ -426,9 +465,10 @@ T &ECS::getComponent(EntityID entityId) {
     ECS_ERROR_IF(componentType.isReadOnly, COMPONENT_TYPE_IS_READ_ONLY);
     ECS_ERROR_IF(componentType.isLocked, COMPONENT_TYPE_IS_LOCKED);
 
-    Component<T>* componentStorage = static_cast<Component<T>*>(componentType.storage);
+    char* componentStorage = static_cast<char*>(componentType.storage);
+    char* componentPtr = componentStorage + (componentID * componentType.componentSize);
 
-    return componentStorage[componentID].data;
+    return (void*)componentPtr;
 }
 
 template <typename T> const T &ECS::readComponent(EntityGUID entityId) const{
@@ -487,8 +527,22 @@ template <typename T> ECS &ECS::setReadWrite(){
     return *this;
 }
 
+template <typename T> std::string ECS::toString(T &t, int arraySize){
+    return toString<T>((void*)&t, *this, arraySize);
+}
+
+template <typename U, typename T> std::string ECS::toString(T &t, std::string memberName){
+    MemberMeta member = getMemberMeta<T>(memberName);
+    void* memberPtr = reinterpret_cast<uint8_t*>(&t) + member.offset;
+    return toString<U>(memberPtr, *this, member.arraySize);
+}
+
+template <typename T> ECS &ECS::addComponentType(size_t reserve){
+    return addComponentType<T>(typeid(T).name(), reserve);
+}
+
 template <typename T>
-ECS &ECS::addComponentType(size_t reserve) {
+ECS &ECS::addComponentType(std::string name, size_t reserve) {
     TypeID typeID = typeid(T).hash_code();
 
     ECS_WARNING_IF(restricted, ECS_IS_RESTRICTED, *this);
@@ -499,10 +553,13 @@ ECS &ECS::addComponentType(size_t reserve) {
 
     componentTypes[typeID] = {
         .storage = storage,
+        .componentSize = sizeof(Component<T>),
         .size = 0,
         .capacity = reserve,
         .removeComponentTypeFunc = removeComponentType_<T>,
         .removeComponentFunc = removeComponent_<T>,
+        .toString = toString<T>,
+        .name = name,
     };
 
     return *this;
@@ -523,6 +580,72 @@ ECS &ECS::removeComponentType() {
 
     componentTypes.erase(typeID);
     return *this;
+}
+
+template <typename T> std::string ECS::getName(){
+    TypeID typeID = typeid(T).hash_code();
+
+    ECS_WARNING_IF(restricted, ECS_IS_RESTRICTED, "");
+
+    auto componentTypeIt = componentTypes.find(typeID);
+    ECS_WARNING_IF(componentTypeIt == componentTypes.end(), COMPONENT_TYPE_DOESNT_EXIST, "");
+
+    ComponentType& componentType = componentTypeIt->second;
+
+    return componentType.name;
+}
+
+template <typename T> TypeID ECS::getTypeID(){
+    TypeID typeID = typeid(T).hash_code();
+
+    ECS_WARNING_IF(restricted, ECS_IS_RESTRICTED, 0);
+
+    auto componentTypeIt = componentTypes.find(typeID);
+    ECS_WARNING_IF(componentTypeIt == componentTypes.end(), COMPONENT_TYPE_DOESNT_EXIST, 0);
+
+    return typeID;
+}
+
+template <typename T, typename MemberType>
+ECS &ECS::addMemberMeta(MemberType T::*memberPtr, std::string name, int arraySize_, std::string (*toString_)(void*, ECS&, int)) {
+    ECS_WARNING_IF(restricted, ECS_IS_RESTRICTED, *this);
+
+    TypeID componentTypeID = typeid(T).hash_code();
+    auto componentTypeIt = componentTypes.find(componentTypeID);
+    ECS_WARNING_IF(componentTypeIt == componentTypes.end(), COMPONENT_TYPE_DOESNT_EXIST, *this);
+
+    ComponentType& componentType = componentTypeIt->second;
+
+    MemberMeta member{
+        .offset = reinterpret_cast<size_t>(&(reinterpret_cast<T*>(0)->*memberPtr)),
+        .size = sizeof(MemberType),
+        .isPointer = std::is_pointer<MemberType>::value,
+        .arraySize = arraySize_,
+    };
+
+    if(toString_ == nullptr){
+        member.toString = toString<MemberType>;
+    }else{
+        member.toString = toString_;
+    }
+
+    componentType.members.insert({name, member});
+
+    return *this;
+}
+
+template <typename T> MemberMeta ECS::getMemberMeta(std::string name){
+    TypeID typeID = typeid(T).hash_code();
+
+    auto componentTypeIt = componentTypes.find(typeID);
+    ECS_WARNING_IF(componentTypeIt == componentTypes.end(), COMPONENT_TYPE_DOESNT_EXIST, MemberMeta{});
+
+    ComponentType& componentType = componentTypeIt->second;
+
+    auto memberIt = componentType.members.find(name);
+    ECS_WARNING_IF(memberIt == componentType.members.end(), MEMBER_DOESNT_EXIST, MemberMeta{});
+
+    return memberIt->second;
 }
 
 template <typename T>
@@ -851,7 +974,7 @@ ECS &ECS::runSystemBatch(SystemBatchID id){
     return *this;
 }
 
-std::vector<ECS::TypeID> ECS::getAllComponentTypeIDs() {
+std::vector<TypeID> ECS::getAllComponentTypeIDs() {
     std::vector<TypeID> componentTypeIDs;
 
     for (const auto& componentTypeID : componentTypes) {
@@ -861,7 +984,7 @@ std::vector<ECS::TypeID> ECS::getAllComponentTypeIDs() {
     return componentTypeIDs;
 }
 
-std::vector<ECS::TypeID> ECS::getParallelSystemComponentIDs(SystemBatchID id, size_t index){
+std::vector<TypeID> ECS::getParallelSystemComponentIDs(SystemBatchID id, size_t index){
     std::vector<TypeID> componentTypeIDs;
 
     auto systemBatchIt = systemBatches.find(id);
@@ -972,5 +1095,212 @@ bool ECS::errorIf(bool condition, const std::string& message, const char* func){
     }
     return false;
 }
+
+template <typename T>
+struct is_vector : std::false_type {};
+
+template <typename T, typename Alloc>
+struct is_vector<std::vector<T, Alloc>> : std::true_type {};
+
+template <typename T>
+struct is_unordered_map : std::false_type {};
+
+template <typename Key, typename Value, typename Hash, typename KeyEqual, typename Alloc>
+struct is_unordered_map<std::unordered_map<Key, Value, Hash, KeyEqual, Alloc>> : std::true_type {};
+
+template <typename T>
+std::string ECS::toString(void* data, ECS &ecs, int arraySize){
+    const T& value = *static_cast<T*>(data);
+
+    TypeID typeID = typeid(T).hash_code();
+    auto componentTypeIt = ecs.componentTypes.find(typeID);
+
+    if constexpr (std::is_same_v<T, std::string>) {
+        return "\"" + value + "\"";
+    }
+    else if constexpr (std::is_same_v<T, char>) {
+        return "\"" + std::to_string(value) + "\"";
+    }
+    else if constexpr (std::is_same_v<T, bool>) {
+        return value ? "true" : "false";
+    }
+    else if constexpr (std::is_same_v<T, EntityGUID>) {
+        return std::to_string(value.id);
+    }
+    else if constexpr (std::is_same_v<T, EntityID>) {
+        return std::to_string(value);
+    }
+    else if constexpr (std::is_arithmetic_v<T>) {
+        return std::to_string(value);
+    }
+    else if constexpr (std::is_array_v<T>) {
+        std::string result = "[";
+        constexpr std::size_t N = std::extent_v<T>;
+        for (std::size_t i = 0; i < N; ++i) {
+            if (i > 0) result += ", ";
+            using ElementType = std::remove_extent_t<T>;
+            const ElementType& element = value[i];
+            result += toString<ElementType>((void*)&element, ecs);
+        }
+        result += "]";
+        return result;
+    }
+    else if constexpr (is_vector<T>::value) {
+        std::string result;
+        for (size_t i = 0; i < value.size(); ++i) {
+            if (i > 0) result += " ";
+            result += toString<typename T::value_type>((void*)&value[i], ecs);
+        }
+        return result;
+    }
+    else if constexpr (is_unordered_map<T>::value) {
+        std::string result = "[";
+        bool first = true;
+        for (const auto& pair : value) {
+            if (!first) result += " ";
+            first = false;
+            result += toString<typename T::key_type>((void*)&pair.first, ecs);
+            result += ": ";
+            result += toString<typename T::mapped_type>((void*)&pair.second, ecs);
+        }
+        return result += "]";
+    }
+    else if constexpr (std::is_pointer<T>::value) {
+        using Pointee = typename std::remove_pointer<T>::type;
+        if (value == nullptr) {
+            return "null";
+        }
+        if(arraySize == 0){
+            return toString<Pointee>((void*)value, ecs);
+        }
+
+        std::string result = "[";
+        for(int i = 0; i < arraySize; i++){
+            if (i > 0) {
+                result += ", ";
+            }
+            void* element = reinterpret_cast<uint8_t*>(value) + i * sizeof(Pointee);
+            result += toString<Pointee>(element, ecs);
+        }
+        result += "]";
+        return result;
+    }
+    else if (componentTypeIt != ecs.componentTypes.end()) {
+        ComponentType& componentType = componentTypeIt->second;
+        std::string result = "[";
+
+        bool first = true;
+        for (auto memberPair : componentType.members) {
+            const MemberMeta& member = memberPair.second;
+            if (!first) {
+                result += ", ";
+            }
+            first = false;
+            std::string memberName = memberPair.first;
+            void* memberPtr = reinterpret_cast<uint8_t*>(data) + member.offset;
+            std::string memberValue = member.toString(memberPtr, ecs, member.arraySize);
+            result += memberName + ": " + memberValue;
+        }
+        result += "]";
+        return result;
+    }
+    else {
+        return "Unknown type";
+    }
+}
+
+std::string ECS::toString(EntityGUID guid){
+    return toString(getEntityID(guid));
+}
+std::string ECS::toString(EntityID entityID){
+    ECS_ERROR_IF(entityID.id >= entities->size(), ENTITY_DOESNT_EXIST);
+
+    Entity &entity = (*entities)[entityID.id];
+
+    std::string result = "[";
+
+    bool first = true;
+
+    for(auto &componentID : entity.componentIDs){
+        if(!first){
+            result += ", ";
+        }
+        first = false;
+        TypeID typeID = componentID.first;
+        void* componentPtr = getComponent(entityID, typeID);
+
+        ComponentType &componentType = componentTypes.at(typeID);
+
+        std::string componentString = componentType.toString(componentPtr, *this, 0);
+        result += componentType.name + ": " + componentString;
+    }
+
+    return result += "]";
+}
+
+std::string ECS::prettyFormat(const std::string& input) {
+    std::string output;
+    int indent = 0;
+    bool newLine = false;
+    bool inValue = false;
+
+    auto writeIndent = [&]() {
+        output += '\n';
+        output += std::string(indent * 2, ' ');
+    };
+
+    for (size_t i = 0; i < input.size(); ++i) {
+        char c = input[i];
+
+        switch (c) {
+            case '[':
+                output += c;
+                indent++;
+                writeIndent();
+                break;
+            case ']':
+                indent--;
+                writeIndent();
+                output += c;
+                inValue = false;
+                break;
+            case ',':
+                output += c;
+                writeIndent();
+                inValue = false;
+                break;
+            case ':':
+                output += ": ";
+                inValue = true;
+                break;
+            case ' ':
+                // skip unnecessary spaces
+                if (!inValue) break;
+                [[fallthrough]];
+            default:
+                output += c;
+                break;
+        }
+    }
+
+    return output;
+}
+
+std::string ECS::toString(){
+    std::string result = "[";
+
+    for (size_t i = 0; i < entities->size(); i++) {
+        if (i > 0) {
+            result += ", ";
+        }
+        Entity &entity = (*entities)[i];
+        result += std::to_string(entity.guid.id) + ": " + toString(EntityID{i});
+    }
+    result += "]";
+
+
+    return result;
+}
+
 
 } // namespace bbecs
