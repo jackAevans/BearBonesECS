@@ -55,6 +55,7 @@ struct MemberMeta {
     int arraySize;
 
     std::string (*toString)(void*, ECS&, int);
+    void (*fromString)(void*, std::string, ECS&, int);
 };
 
 using SystemBatchID = uint64_t;
@@ -86,9 +87,13 @@ class ECS {
         std::string name;
         std::unordered_map<std::string, MemberMeta> members;
         
-        std::string (*toString)(void*, ECS&, int);
-        void (*removeComponentTypeFunc)(ECS &ecs);
+        void (*addComponentFunc)(EntityID entityId, void* component, ECS&);
         void (*removeComponentFunc)(EntityID id, ECS &ecs);
+
+        void (*removeComponentTypeFunc)(ECS &ecs);
+
+        std::string (*toString)(void*, ECS&, int);
+        void (*fromString)(void*, std::string, ECS&, int);
     };
 
     struct System{
@@ -104,6 +109,7 @@ public:
     ECS();
     ~ECS();
     std::string toString(); 
+    void fromString(std::string str);
     static std::string prettyFormat(const std::string& input);
 
     // Entity management
@@ -113,12 +119,19 @@ public:
     ECS &removeEntity(EntityID entityId);
     const EntityID getEntityID(EntityGUID guid) const;
     std::string toString(EntityGUID guid);
-    std::string toString(EntityID guid);
+    std::string toString(EntityID id);
+    void fromString(EntityGUID guid, std::string str);
+    void fromString(EntityID id, std::string str);
 
     // Component management
+    void addComponent(EntityID entityId, TypeID typeID, void* component);
+    template <typename T> ECS &addComponent(T &&component);
+    template <typename T> ECS &addComponent(EntityGUID entityId, T &&component);
+    template <typename T> ECS &addComponent(EntityID entityId, T &&component);
     template <typename T, typename... Args> ECS &addComponent(Args&&... args);
     template <typename T, typename... Args> ECS &addComponent(EntityGUID entityId, Args&&... args);
     template <typename T, typename... Args> ECS &addComponent(EntityID entityId, Args&&... args);
+    void removeComponent(EntityID entityId, TypeID typeID);
     template <typename T> ECS &removeComponent(EntityGUID entityID);
     template <typename T> ECS &removeComponent(EntityID entityID);
 
@@ -132,6 +145,7 @@ public:
     template <typename T> ECS &setReadWrite();
     template <typename T> std::string toString(T &t, int arraySize = 0);
     template <typename U, typename T> std::string toString(T &t, std::string memberName);
+    template <typename T> void fromString(T &t, std::string str, int arraySize = 0);
     
     // Component type management
     template <typename T> ECS &addComponentType(size_t reserve = 10);
@@ -140,7 +154,9 @@ public:
     template <typename T> std::string getName();
     template <typename T> TypeID getTypeID();
     template <typename T, typename MemberType>
-    ECS &addMemberMeta(MemberType T::*memberPtr, std::string name, int arraySize_ = 0, std::string (*toString_)(void*, ECS&, int) = nullptr);
+    ECS &addMemberMeta(MemberType T::*memberPtr, std::string name, int arraySize_ = 0, 
+            std::string (*toString_)(void*, ECS&, int) = nullptr, void (*fromString_)(void*, std::string, ECS&, int) = nullptr);
+    MemberMeta getMemberMeta(std::string name, TypeID typeID);
     template <typename T> MemberMeta getMemberMeta(std::string name);
 
     // Looping through components
@@ -161,6 +177,7 @@ public:
     ECS &runSystemBatch(SystemBatchID id);
 
 private:
+    template <typename T> static void addComponent(EntityID entityId, void* component, ECS& ecs);
     template<typename... Components> std::tuple<Components&...> getComponents(EntityID entityId);
     std::vector<TypeID> getAllComponentTypeIDs();
     std::vector<TypeID> getParallelSystemComponentIDs(SystemBatchID id, size_t index);
@@ -172,19 +189,21 @@ private:
     ECS &unrestrict();
     static EntityGUID generateGUID();
     static SystemBatchID generateSystemBatchID();
-    template <typename T> static void refitComponentTypeStorage(ComponentType& componentType, float growthFactor);
+    static void refitComponentTypeStorage(ComponentType& componentType, float growthFactor);
     static bool haveCommonElements(const std::vector<TypeID>& vec1, const std::vector<TypeID>& vec2);
     static bool warnIf(bool condition, const std::string& message, const char* func);
     static bool errorIf(bool condition, const std::string& message, const char* func);
     template <typename T> static void removeComponentType_(ECS &ecs);
     template <typename T> static void removeComponent_(EntityID id, ECS &ecs);
 
-    template <typename T>
-    static std::string toString(void* data, ECS &ecs, int arraySize = 1);
+    static std::vector<std::string> splitTopLevelCommaSections(const std::string& input);
+    template <typename T> static std::string toString(void* data, ECS &ecs, int arraySize = 0);
+    template <typename T> static void fromString(void* ptr, std::string str, ECS &ecs, int arraySize = 0);
 
     std::unordered_map<EntityGUID, EntityID> *entitiesMap; 
     std::vector<Entity> *entities;
     std::unordered_map<TypeID, ComponentType> componentTypes; 
+    std::unordered_map<std::string, TypeID> componentTypeNames;
     EntityID cachedEntityID = {SIZE_MAX};
 
     std::unordered_map<SystemBatchID, SystemBatch> systemBatches;
@@ -343,11 +362,40 @@ const EntityID ECS::getEntityID(EntityGUID guid) const{
     return entityIt->second;
 }
 
+void ECS::addComponent(EntityID entityId, TypeID typeID, void* component){
+    ECS_ERROR_IF(restricted, ECS_IS_RESTRICTED);
+
+    ECS_ERROR_IF(entityId.id >= entities->size(), ENTITY_DOESNT_EXIST);
+
+    auto componentTypeIt = componentTypes.find(typeID);
+    ECS_ERROR_IF(componentTypeIt == componentTypes.end(), COMPONENT_TYPE_DOESNT_EXIST);
+
+    ComponentType& componentType = componentTypeIt->second;
+
+    componentType.addComponentFunc(entityId, component, *this);
+}
+
+template <typename T> void ECS::addComponent(EntityID entityId, void* component, ECS& ecs){
+    ecs.addComponent<T>(entityId, *static_cast<T*>(component));
+}
+
 template <typename T, typename... Args>
 ECS &ECS::addComponent(Args&&... args) {
     addComponent<T>(cachedEntityID, std::forward<Args>(args)...);
     return *this;
 }
+
+template <typename T> ECS &ECS::addComponent(T &&component){
+    addComponent<T>(cachedEntityID, component);
+    return *this;
+}
+
+template <typename T> ECS &ECS::addComponent(EntityGUID entityId, T &&component){
+    return addComponent<T>(getEntityID(entityId), std::forward<T>(component));
+}
+template <typename T> ECS &ECS::addComponent(EntityID entityId, T &&component){
+    return addComponent<T>(entityId, std::forward<T>(component));
+}   
 
 template <typename T, typename... Args>
 ECS &ECS::addComponent(EntityGUID entityId, Args&&... args) {
@@ -373,7 +421,7 @@ ECS &ECS::addComponent(EntityID entityId, Args&&... args) {
     ECS_WARNING_IF((*entities).at(entityId.id).componentIDs.find(typeID) != (*entities).at(entityId.id).componentIDs.end(), ENTITY_ALREADY_CONTAINS_COMPONENT, *this);
 
     if (componentType.size >= componentType.capacity) {
-        refitComponentTypeStorage<T>(componentType, componentType.growthFactor);
+        refitComponentTypeStorage(componentType, componentType.growthFactor);
     }
 
     Component<T>* componentStorage = static_cast<Component<T>*>(componentType.storage);
@@ -383,6 +431,24 @@ ECS &ECS::addComponent(EntityID entityId, Args&&... args) {
     componentType.size++;
 
     return *this;
+}
+
+void ECS::removeComponent(EntityID entityId, TypeID typeID){
+    ECS_ERROR_IF(restricted, ECS_IS_RESTRICTED);
+
+    ECS_ERROR_IF(entityId.id >= entities->size(), ENTITY_DOESNT_EXIST);
+
+    auto componentTypeIt = componentTypes.find(typeID);
+    ECS_ERROR_IF(componentTypeIt == componentTypes.end(), COMPONENT_TYPE_DOESNT_EXIST);
+
+    auto componentIndexIt = (*entities).at(entityId.id).componentIDs.find(typeID);
+    ECS_ERROR_IF(componentIndexIt == (*entities).at(entityId.id).componentIDs.end(), ENTITY_DOESNT_CONTAIN_COMPONENT);
+
+    ComponentType& componentType = componentTypeIt->second;
+
+    ECS_ERROR_IF(componentType.isLocked, COMPONENT_TYPE_IS_LOCKED);
+
+    componentType.removeComponentFunc(entityId, *this);
 }
 
 template <typename T>
@@ -421,7 +487,7 @@ ECS &ECS::removeComponent(EntityID entityID) {
     componentType.size--;
 
     if (componentType.size < componentType.capacity / componentType.growthFactor) {
-        refitComponentTypeStorage<T>(componentType, 1.0f / componentType.growthFactor);
+        refitComponentTypeStorage(componentType, 1.0f / componentType.growthFactor);
     }
 
     (*entities).at(entityID.id).componentIDs.erase(typeID);
@@ -537,6 +603,11 @@ template <typename U, typename T> std::string ECS::toString(T &t, std::string me
     return toString<U>(memberPtr, *this, member.arraySize);
 }
 
+template <typename T> void ECS::fromString(T &t, std::string str, int arraySize){
+    fromString<T>((void*)&t, str, *this, arraySize);
+}
+
+
 template <typename T> ECS &ECS::addComponentType(size_t reserve){
     return addComponentType<T>(typeid(T).name(), reserve);
 }
@@ -556,11 +627,15 @@ ECS &ECS::addComponentType(std::string name, size_t reserve) {
         .componentSize = sizeof(Component<T>),
         .size = 0,
         .capacity = reserve,
+        .addComponentFunc = addComponent<T>,
         .removeComponentTypeFunc = removeComponentType_<T>,
         .removeComponentFunc = removeComponent_<T>,
         .toString = toString<T>,
+        .fromString = fromString<T>,
         .name = name,
     };
+
+    componentTypeNames[name] = typeID;
 
     return *this;
 }
@@ -600,14 +675,15 @@ template <typename T> TypeID ECS::getTypeID(){
 
     ECS_WARNING_IF(restricted, ECS_IS_RESTRICTED, 0);
 
-    auto componentTypeIt = componentTypes.find(typeID);
-    ECS_WARNING_IF(componentTypeIt == componentTypes.end(), COMPONENT_TYPE_DOESNT_EXIST, 0);
+    ECS_WARNING_IF(componentTypes.find(typeID) == componentTypes.end(), COMPONENT_TYPE_DOESNT_EXIST, 0);
 
     return typeID;
 }
 
 template <typename T, typename MemberType>
-ECS &ECS::addMemberMeta(MemberType T::*memberPtr, std::string name, int arraySize_, std::string (*toString_)(void*, ECS&, int)) {
+ECS &ECS::addMemberMeta(MemberType T::*memberPtr, std::string name, int arraySize_, 
+        std::string (*toString_)(void*, ECS&, int), void (*fromString_)(void*, std::string, ECS&, int)) {
+
     ECS_WARNING_IF(restricted, ECS_IS_RESTRICTED, *this);
 
     TypeID componentTypeID = typeid(T).hash_code();
@@ -623,6 +699,12 @@ ECS &ECS::addMemberMeta(MemberType T::*memberPtr, std::string name, int arraySiz
         .arraySize = arraySize_,
     };
 
+    if(fromString_ == nullptr){
+        member.fromString = fromString<MemberType>;
+    }else{
+        member.fromString = fromString_;
+    }
+
     if(toString_ == nullptr){
         member.toString = toString<MemberType>;
     }else{
@@ -634,9 +716,7 @@ ECS &ECS::addMemberMeta(MemberType T::*memberPtr, std::string name, int arraySiz
     return *this;
 }
 
-template <typename T> MemberMeta ECS::getMemberMeta(std::string name){
-    TypeID typeID = typeid(T).hash_code();
-
+MemberMeta ECS::getMemberMeta(std::string name, TypeID typeID){
     auto componentTypeIt = componentTypes.find(typeID);
     ECS_WARNING_IF(componentTypeIt == componentTypes.end(), COMPONENT_TYPE_DOESNT_EXIST, MemberMeta{});
 
@@ -646,6 +726,10 @@ template <typename T> MemberMeta ECS::getMemberMeta(std::string name){
     ECS_WARNING_IF(memberIt == componentType.members.end(), MEMBER_DOESNT_EXIST, MemberMeta{});
 
     return memberIt->second;
+}
+
+template <typename T> MemberMeta ECS::getMemberMeta(std::string name){
+    return getMemberMeta(name, typeid(T).hash_code());
 }
 
 template <typename T>
@@ -1017,12 +1101,11 @@ bool ECS::haveCommonElements(const std::vector<TypeID>& vec1, const std::vector<
     return false; // No common elements
 }
 
-template <typename T>
 void ECS::refitComponentTypeStorage(ComponentType& componentType, float growthFactor) {
     size_t newCapacity = std::ceil(componentType.capacity * growthFactor);
-    void* newStorage = new uint8_t[newCapacity * sizeof(Component<T>)];
+    void* newStorage = new uint8_t[newCapacity * componentType.componentSize];
 
-    memcpy(newStorage, componentType.storage, sizeof(Component<T>) * componentType.size);
+    memcpy(newStorage, componentType.storage, componentType.componentSize * componentType.size);
 
     delete[] static_cast<uint8_t*>(componentType.storage);
 
@@ -1131,7 +1214,9 @@ std::string ECS::toString(void* data, ECS &ecs, int arraySize){
         return std::to_string(value);
     }
     else if constexpr (std::is_arithmetic_v<T>) {
-        return std::to_string(value);
+        std::ostringstream oss;
+        oss << std::setprecision(15) << value;
+        return oss.str();
     }
     else if constexpr (std::is_array_v<T>) {
         std::string result = "[";
@@ -1146,11 +1231,12 @@ std::string ECS::toString(void* data, ECS &ecs, int arraySize){
         return result;
     }
     else if constexpr (is_vector<T>::value) {
-        std::string result;
+        std::string result = "[";
         for (size_t i = 0; i < value.size(); ++i) {
-            if (i > 0) result += " ";
+            if (i > 0) result += ", ";
             result += toString<typename T::value_type>((void*)&value[i], ecs);
         }
+        result += "]";
         return result;
     }
     else if constexpr (is_unordered_map<T>::value) {
@@ -1238,10 +1324,41 @@ std::string ECS::toString(EntityID entityID){
     return result += "]";
 }
 
+void ECS::fromString(EntityGUID guid, std::string str){
+    fromString(getEntityID(guid), str);
+}
+void ECS::fromString(EntityID id, std::string str){
+    ECS_WARNING_IF(id.id >= entities->size(), ENTITY_DOESNT_EXIST, );
+
+    str.erase(remove_if(str.begin(), str.end(), ::isspace), str.end()); // Trim spaces
+    str = str.substr(1, str.size() - 2); // Strip brackets
+
+    std::vector<std::string> tokens = splitTopLevelCommaSections(str);
+    for (const auto& token : tokens) {
+        if (token.empty()) continue;
+    
+        auto colon = token.find(':');
+        if (colon == std::string::npos) continue;
+        std::string keyStr = token.substr(0, colon);
+        std::string valStr = token.substr(colon + 1);
+        keyStr.erase(remove_if(keyStr.begin(), keyStr.end(), ::isspace), keyStr.end());
+        valStr.erase(0, valStr.find_first_not_of(" \t"));
+
+        TypeID typeID = componentTypeNames.at(keyStr);
+
+        uint8_t* componentPtr = new uint8_t[componentTypes.at(typeID).componentSize];
+
+        componentTypes.at(typeID).fromString((void*)componentPtr, valStr, *this, 0);
+
+        addComponent(id, typeID, (void*)componentPtr);
+        
+        delete[] componentPtr;
+    }
+}
+
 std::string ECS::prettyFormat(const std::string& input) {
     std::string output;
     int indent = 0;
-    bool newLine = false;
     bool inValue = false;
 
     auto writeIndent = [&]() {
@@ -1300,6 +1417,205 @@ std::string ECS::toString(){
 
 
     return result;
+}
+
+void ECS::fromString(std::string str){
+    str.erase(remove_if(str.begin(), str.end(), ::isspace), str.end()); // Trim spaces
+    str = str.substr(1, str.size() - 2); // Strip brackets
+
+    std::vector<std::string> tokens = splitTopLevelCommaSections(str);
+    for (const auto& token : tokens) {
+        if (token.empty()) continue;
+    
+        auto colon = token.find(':');
+        if (colon == std::string::npos) continue;
+        std::string keyStr = token.substr(0, colon);
+        std::string valStr = token.substr(colon + 1);
+        keyStr.erase(remove_if(keyStr.begin(), keyStr.end(), ::isspace), keyStr.end());
+        valStr.erase(0, valStr.find_first_not_of(" \t"));
+
+        EntityGUID id{std::stoull(keyStr)};
+
+        addEntity(id);
+        fromString(id, valStr);
+    }
+}
+
+std::vector<std::string> ECS::splitTopLevelCommaSections(const std::string& input) {
+    std::vector<std::string> sections;
+    int depth = 0;
+    std::string currentSection;
+
+    for (char c : input) {
+        if (c == '[') {
+            depth++;
+        } else if (c == ']') {
+            depth--;
+        } else if (c == ',' && depth == 0) {
+            sections.push_back(currentSection);
+            currentSection.clear();
+            continue;
+        }
+        currentSection += c;
+    }
+
+    if (!currentSection.empty()) {
+        sections.push_back(currentSection);
+    }
+
+    return sections;
+}
+
+template <typename T>
+void ECS::fromString(void* ptr, std::string str, ECS &ecs, int arraySize) {
+    T& value = *static_cast<T*>(ptr);
+
+    if constexpr (std::is_same_v<T, std::string>) {
+        str.erase(remove_if(str.begin(), str.end(), ::isspace), str.end()); // Trim spaces
+        if (!str.empty() && str.front() == '"' && str.back() == '"') {
+            value = str.substr(1, str.size() - 2); // Remove quotes
+        } else {
+            value = str;
+        }
+    }
+    else if constexpr (std::is_same_v<T, char>) {
+        if (!str.empty()) {
+            value = (str.front() == '"' && str.size() >= 3) ? str[1] : str[0];
+        }
+    }
+    else if constexpr (std::is_same_v<T, bool>) {
+        value = (str == "true");
+    }
+    else if constexpr (std::is_same_v<T, EntityGUID>) {
+        value.id = std::stoull(str);
+    }
+    else if constexpr (std::is_same_v<T, EntityID>) {
+        value.id = std::stoull(str);
+    }
+    else if constexpr (std::is_arithmetic_v<T>) {
+        std::istringstream iss(str);
+        iss >> value;
+    }
+    else if constexpr (std::is_array_v<T>) {
+        using Elem = std::remove_extent_t<T>;
+        constexpr std::size_t N = std::extent_v<T>;
+        str = str.substr(1, str.size() - 2); // Strip brackets
+
+        std::vector<std::string> sections = splitTopLevelCommaSections(str);
+
+        int i = 0;
+        for (const auto& section : sections) {
+            std::string token = section;
+            token.erase(remove_if(token.begin(), token.end(), ::isspace), token.end()); // Trim spaces
+            if (token.empty()) continue;
+
+            if (i >= N) break; // Prevent overflow
+
+            void* elementPtr = reinterpret_cast<uint8_t*>(value) + i * sizeof(Elem);
+            fromString<Elem>(elementPtr, token, ecs);
+            ++i;
+        }
+    }
+    else if constexpr (is_vector<T>::value) {
+        using Elem = typename T::value_type;
+        value.clear();
+
+        str = str.substr(1, str.size() - 2);
+        std::vector<std::string> sections = splitTopLevelCommaSections(str);
+
+        for(const auto& section : sections) {
+            std::string token = section;
+            token.erase(remove_if(token.begin(), token.end(), ::isspace), token.end()); // Trim spaces
+            if (token.empty()) continue;
+
+            fromString<Elem>(&value.emplace_back(), token, ecs);
+        }
+    }
+    else if constexpr (is_unordered_map<T>::value) {
+        using Key = typename T::key_type;
+        using Val = typename T::mapped_type;
+        value.clear();
+
+        str = str.substr(1, str.size() - 2);
+        std::vector<std::string> sections = splitTopLevelCommaSections(str);
+
+        for (const auto& section : sections) {
+            std::string token = section;
+            token.erase(remove_if(token.begin(), token.end(), ::isspace), token.end()); // Trim spaces
+            if (token.empty()) continue;
+
+            auto colon = token.find(':');
+            if (colon == std::string::npos) continue;
+            std::string keyStr = token.substr(0, colon);
+            std::string valStr = token.substr(colon + 1);
+            keyStr.erase(remove_if(keyStr.begin(), keyStr.end(), ::isspace), keyStr.end());
+            valStr.erase(0, valStr.find_first_not_of(" \t"));
+
+            Key key;
+            Val val;
+            fromString<Key>(&key, keyStr, ecs);
+            fromString<Val>(&val, valStr, ecs);
+            value[key] = val;
+        }
+    }
+    else if constexpr (std::is_pointer<T>::value) {
+        using Pointee = std::remove_pointer_t<T>;
+
+        if (str == "null") {
+            value = nullptr;
+        } else {
+            if (arraySize == 0) {
+                value = new Pointee;
+                fromString<Pointee>(value, str, ecs);
+            } else {
+                value = new Pointee[arraySize];
+                str = str.substr(1, str.size() - 2);
+
+                std::vector<std::string> sections = splitTopLevelCommaSections(str);
+
+                if (sections.size() != (size_t)arraySize) {
+                    ECS_WARNING_IF(true, "Array size mismatch", );
+                }
+
+                int i = 0;
+                for (const auto& section : sections) {
+                    std::string token = section;
+                    token.erase(remove_if(token.begin(), token.end(), ::isspace), token.end()); // Trim spaces
+                    if (token.empty()) continue;
+
+                    void* elementPtr = reinterpret_cast<uint8_t*>(value) + i * sizeof(Pointee);
+                    fromString<Pointee>(elementPtr, token, ecs);
+                    ++i;
+                }
+
+            }
+        }
+    }
+    else {
+        TypeID typeID = typeid(T).hash_code();
+        auto componentTypeIt = ecs.componentTypes.find(typeID);
+
+        if (componentTypeIt != ecs.componentTypes.end()) {
+            str = str.substr(1, str.size() - 2); // Remove brackets
+
+            std::vector<std::string> sections = splitTopLevelCommaSections(str);
+            for (const auto& section : sections) {
+                auto colon = section.find(':');
+                if (colon == std::string::npos) continue;
+                std::string keyStr = section.substr(0, colon);
+                std::string valStr = section.substr(colon + 1);
+                keyStr.erase(remove_if(keyStr.begin(), keyStr.end(), ::isspace), keyStr.end());
+                valStr.erase(0, valStr.find_first_not_of(" \t"));
+
+                MemberMeta memberMeta = ecs.getMemberMeta(keyStr, typeID);
+
+                uint8_t* memberPtr = reinterpret_cast<uint8_t*>(ptr) + memberMeta.offset;
+                memberMeta.fromString(memberPtr, valStr, ecs, memberMeta.arraySize);
+            }
+        } else {
+            ECS_WARNING_IF(true, "Unknown type", );
+        }
+    }
 }
 
 
