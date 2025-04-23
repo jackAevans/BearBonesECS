@@ -26,7 +26,7 @@ int main() {
     bbECS::SystemBatchID sbID = ecs.addSystemBatch(); // Add a SystemBatch
 
     // Add systems to the SystemBatch
-    ecs.addSystem(sbID, [&guid](bbECS::ECS& ecs){
+    ecs.addSystem(sbID, [guid](bbECS::ECS& ecs){
         std::cout << "Running my first ever system!" << std::endl;
         
         ecs.getComponent<Position>(guid).x += 1; // Modify the Position component
