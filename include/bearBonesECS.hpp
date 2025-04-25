@@ -105,6 +105,7 @@ class ECS {
 
         bool isLocked = false;
         bool isReadOnly = false;
+        bool isSingular = false;
 
         std::string name;
         std::unordered_map<std::string, MemberMeta> members;
@@ -171,12 +172,14 @@ public:
 
     // Component access
     void* getComponent(EntityID entityID, ComponentTypeID componentTypeID);
+    template <typename T> T &getComponent();
     template <typename T> T &getComponent(EntityGUID entityGUID);
     template <typename T> T &getComponent(EntityID entityID);
     template <typename T> const T &readComponent(EntityGUID entityGUID) const;
     template <typename T> const T &readComponent(EntityID entityID) const;
     template <typename T> ECS &setReadOnly();
     template <typename T> ECS &setReadWrite();
+    template <typename T> ECS &setSingular();
     template <typename T> std::string toString(T &t, int arraySize = 0);
     template <typename U, typename T> std::string toString(T &t, std::string memberName);
     template <typename T> void fromString(T &t, std::string str, int arraySize = 0);
@@ -543,6 +546,9 @@ ECS &ECS::addComponent(EntityID entityId, Args&&... args) {
 
     ComponentType& componentType = componentTypeIt->second;
 
+    ECS_WARNING_IF(componentType.isSingular && componentType.size > 0, 
+                "Singular component already exists '" + componentType.name + "'", *this);
+
     ECS_WARNING_IF(componentType.isLocked, COMPONENT_TYPE_IS_LOCKED(componentType.name), *this);
 
     ECS_WARNING_IF((*entities).at(entityId.id).componentIDs.find(typeID) != (*entities).at(entityId.id).componentIDs.end(),
@@ -638,6 +644,22 @@ std::tuple<Components&...> ECS::getComponents(EntityID entityId) {
     return std::tuple<Components&...>{getComponent<Components>(entityId)...};
 }
 
+template <typename T> T &ECS::getComponent(){
+    ComponentTypeID typeID = typeid(T).hash_code();
+
+    auto componentTypeIt = componentTypes.find(typeID);
+    ECS_ERROR_IF(componentTypeIt == componentTypes.end(), COMPONENT_TYPE_DOESNT_EXIST(std::to_string(typeID)));
+
+    ComponentType& componentType = componentTypeIt->second;
+
+    ECS_ERROR_IF(componentType.isReadOnly, COMPONENT_TYPE_IS_READ_ONLY(componentType.name));
+    ECS_ERROR_IF(componentType.isLocked, COMPONENT_TYPE_IS_LOCKED(componentType.name));
+
+    Component<T>* componentPtrCasted = static_cast<Component<T>*>(componentType.storage);
+
+    return componentPtrCasted->data;
+}
+
 template <typename T>
 T &ECS::getComponent(EntityGUID entityId) {
     return getComponent<T>(getEntityID(entityId));
@@ -729,6 +751,24 @@ template <typename T> ECS &ECS::setReadWrite(){
     ECS_WARNING_IF(componentType.isLocked, COMPONENT_TYPE_IS_LOCKED(componentType.name), *this);
 
     componentType.isReadOnly = false;
+
+    return *this;
+}
+
+template <typename T> ECS &ECS::setSingular(){
+    ComponentTypeID typeID = typeid(T).hash_code();
+
+    ECS_WARNING_IF(restricted, ECS_IS_RESTRICTED, *this);
+
+    auto componentTypeIt = componentTypes.find(typeID);
+    ECS_WARNING_IF(componentTypeIt == componentTypes.end(), COMPONENT_TYPE_DOESNT_EXIST(std::to_string(typeID)), *this);
+
+    ComponentType& componentType = componentTypeIt->second;
+    ECS_WARNING_IF(componentType.isLocked, COMPONENT_TYPE_IS_LOCKED(componentType.name), *this);
+
+    ECS_WARNING_IF(componentType.size > 1, "More than one component already exists '" + componentType.name + "'", *this);
+
+    componentType.isSingular = true;
 
     return *this;
 }
